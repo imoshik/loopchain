@@ -28,7 +28,7 @@ from loopchain.baseservice import BroadcastScheduler, BroadcastSchedulerFactory,
 from loopchain.baseservice import ObjectManager, CommonSubprocess
 from loopchain.baseservice import RestStubManager, NodeSubscriber
 from loopchain.baseservice import StubManager, PeerManager, PeerStatus, TimerService
-from loopchain.blockchain import Block, BlockBuilder, TransactionSerializer
+from loopchain.blockchain import Block, BlockBuilder, TransactionSerializer, Hash32
 from loopchain.channel.channel_inner_service import ChannelInnerService
 from loopchain.channel.channel_property import ChannelProperty
 from loopchain.channel.channel_statemachine import ChannelStateMachine
@@ -785,9 +785,11 @@ class ChannelService:
         response_to_json_query(response)
 
         block_builder = BlockBuilder.from_new(block, self.block_manager.get_blockchain().tx_versioner)
+        block_builder.reset_cache()
         block_builder.commit_state = {
             ChannelProperty().name: response['stateRootHash']
         }
+        block_builder.state_root_hash = Hash32(bytes.fromhex(response['stateRootHash']))
         new_block = block_builder.build()
         return new_block, response["txResults"]
 
@@ -821,6 +823,7 @@ class ChannelService:
         block_builder.commit_state = {
             ChannelProperty().name: response['stateRootHash']
         }
+        block_builder.state_root_hash = Hash32(bytes.fromhex(response['stateRootHash']))
         new_block = block_builder.build()
 
         return new_block, response["txResults"]
