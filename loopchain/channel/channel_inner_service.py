@@ -17,6 +17,7 @@ import json
 import multiprocessing as mp
 import re
 import signal
+import time
 from asyncio import Condition
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -151,6 +152,9 @@ class ChannelTxCreatorInnerService(MessageQueueService[ChannelTxCreatorInnerTask
 
         logging.info(f"Channel TX Creator start")
 
+        import setproctitle
+        setproctitle.setproctitle(f"python ChannelTxCreatorInnerService.main {channel_name}")
+
         broadcast_queue.cancel_join_thread()
 
         queue_name = conf.CHANNEL_TX_CREATOR_QUEUE_NAME_FORMAT.format(channel_name=channel_name, amqp_key=amqp_key)
@@ -193,8 +197,15 @@ class ChannelTxReceiverInnerTask:
         self.__tx_queue = tx_queue
 
     @message_queue_task(type_=MessageQueueType.Worker)
-    def add_tx_list(self, request) -> tuple:
+    def add_tx_list(self, request: loopchain_pb2.TxSendList) -> tuple:
         tx_list = []
+        logging.warning(f"ChannelTxReceiverInnerTask add_tx_list: {type(request)}, request_len={len(request.tx_list)}")
+
+        if self.__tx_queue.full():
+            message = "fail tx_list full while AddTxList"
+            logging.error(f"ChannelTxReceiverInnerTask add_tx_list: {message}")
+            return '',
+
         for tx_item in request.tx_list:
             tx_json = json.loads(tx_item.tx_json)
 
@@ -211,6 +222,7 @@ class ChannelTxReceiverInnerTask:
             tx_list.append(tx)
 
         tx_len = len(tx_list)
+        logging.warning(f"ChannelTxReceiverInnerTask add_tx_list: tx_len = {tx_len}")
         if tx_len == 0:
             response_code = message_code.Response.fail
             message = "fail tx validate while AddTxList"
@@ -219,6 +231,7 @@ class ChannelTxReceiverInnerTask:
             response_code = message_code.Response.success
             message = f"success ({len(tx_list)})/({len(request.tx_list)})"
 
+        logging.warning(f"ChannelTxReceiverInnerTask add_tx_list: {response_code, message}")
         return response_code, message
 
 
@@ -238,6 +251,8 @@ class ChannelTxReceiverInnerService(MessageQueueService[ChannelTxReceiverInnerTa
             ModuleProcess.load_properties(properties, "txreceiver")
 
         logging.info(f"Channel TX Receiver start")
+        import setproctitle
+        setproctitle.setproctitle(f"python ChannelTxReceiverInnerService.main {channel_name}")
 
         tx_queue.cancel_join_thread()
 
@@ -308,22 +323,41 @@ class _ChannelTxCreatorProcess(ModuleProcess):
 
 
 class _ChannelTxReceiverProcess(ModuleProcess):
-    def __init__(self, tx_versioner: TransactionVersioner, add_tx_list_callback, loop, crash_callback_in_join_thread):
+    def __init__(self, tx_versioner: TransactionVersioner, add_tx_list_callback, get_tx_count,
+                 loop, crash_callback_in_join_thread):
         super().__init__()
 
         self.__is_running = True
         self.__tx_queue = self.Queue()
         self.__tx_queue.cancel_join_thread()
+        self.__tx_count = 0
 
         async def _add_tx_list(tx_list):
-            add_tx_list_callback(tx_list)
+            """
+            if self.__tx_count > 50:
+                logging.warning(f"_add_tx_list : sleep 5 sec..")
+                await asyncio.sleep(5)
+            """
 
-        def _receive_tx_list(tx_queue):
+            tx_count = add_tx_list_callback(tx_list)
+            self.__tx_count = tx_count
+            logging.error(f"_add_tx_list : tx_count = {tx_count}")
+            return self.__tx_count
+
+        def _receive_tx_list(tx_queue: mp.Queue):
             while True:
+                if get_tx_count() >= conf.LIMIT_TX_COUNT:
+                    logging.error(f"_receive_tx_list : sleep 0.1 sec..")
+                    time.sleep(0.1)
+                    continue
+
                 tx_list = tx_queue.get()
                 if not self.__is_running or tx_list is None:
                     break
-                asyncio.run_coroutine_threadsafe(_add_tx_list(tx_list), loop)
+                logging.warning("start asyncio.run_coroutine(_add_tx_list)")
+                f = asyncio.run_coroutine_threadsafe(_add_tx_list(tx_list), loop)
+                result = f.result()
+                logging.warning(f"result : {result}")
 
             while not tx_queue.empty():
                 tx_queue.get()
@@ -386,6 +420,7 @@ class ChannelInnerTask:
 
         tx_receiver_process = _ChannelTxReceiverProcess(tx_versioner,
                                                         self.__add_tx_list,
+                                                        self.__get_tx_count,
                                                         loop,
                                                         crash_callback_in_join_thread)
         self.__sub_processes.append(tx_receiver_process)
@@ -408,16 +443,23 @@ class ChannelInnerTask:
                 if not self.__loop_for_sub_services.is_closed():
                     self._channel_service.close()
 
-            asyncio.ensure_future(_close(), loop=self.__loop_for_sub_services)
+            await asyncio.ensure_future(_close(), loop=self.__loop_for_sub_services)
         except ValueError:
             # Call this function by cleanup
             pass
 
+    def __get_tx_count(self):
+        object_has_queue = self._channel_service.get_object_has_queue_by_consensus()
+        tx_count = object_has_queue.get_count_of_unconfirmed_tx()
+        return tx_count
+
     def __add_tx_list(self, tx_list):
+        object_has_queue = self._channel_service.get_object_has_queue_by_consensus()
+
         for tx in tx_list:
             # util.logger.spam(f"channel_inner_service:add_tx tx({tx.get_data_string()})")
 
-            object_has_queue = self._channel_service.get_object_has_queue_by_consensus()
+            #object_has_queue = self._channel_service.get_object_has_queue_by_consensus()
             object_has_queue.add_tx_obj(tx)
             util.apm_event(ChannelProperty().peer_id, {
                 'event_type': 'AddTx',
@@ -425,6 +467,11 @@ class ChannelInnerTask:
                 'peer_name': conf.PEER_NAME,
                 'channel_name': ChannelProperty().name,
                 'data': {'tx_hash': tx.hash.hex()}})
+
+        total_tx = object_has_queue.get_total_tx()
+        tx_count = object_has_queue.get_count_of_unconfirmed_tx()
+        logging.warning(f"__add_tx_list() : total_tx = {total_tx}")
+        return tx_count
 
     @message_queue_task
     async def hello(self):

@@ -171,6 +171,7 @@ class _Broadcaster:
 
         for target in self.__get_broadcast_targets(method_name):
             # util.logger.debug(f"method_name({method_name}), peer_target({target})")
+            #logging.warning(f"__broadcast_run_async : method_name = {method_name}, param = {method_param}")
             self.__call_async_to_target(target, method_name, method_param, True, retry_times, timeout)
 
     def __broadcast_run_sync(self, method_name, method_param, retry_times=None, timeout=None):
@@ -235,6 +236,8 @@ class _Broadcaster:
         tx_list_size = 0
         tx_list_count = 0
         remains = False
+
+        # FIXME : check tx_list_size & tx_list_count before get stored_tx_item
         while not self.stored_tx.empty():
             stored_tx_item = self.stored_tx.get()
             tx_list_size += len(stored_tx_item)
@@ -244,6 +247,7 @@ class _Broadcaster:
                 remains = True
                 break
             tx_list.append(stored_tx_item.get_tx_message())
+
         message = loopchain_pb2.TxSendList(
             channel=self.__channel,
             tx_list=tx_list
@@ -263,6 +267,7 @@ class _Broadcaster:
 
             # Send multiple tx
             remains, message = self.__make_tx_list_message()
+            logging.warning(f"send_tx_by_timer : remains = {remains} message len = {len(message.tx_list)}")
             self.__broadcast_run("AddTxList", message)
             ObjectManager().channel_service.start_leader_complain_timer()
             if remains:
@@ -270,17 +275,17 @@ class _Broadcaster:
 
     def __send_tx_in_timer(self, tx_item=None):
         # util.logger.spam(f"broadcast_scheduler:__send_tx_in_timer")
-        duration = 0
         if tx_item:
             self.stored_tx.put(tx_item)
-            duration = conf.SEND_TX_LIST_DURATION
+        logging.warning(f"send_tx_in_timer : stored_tx size = {self.stored_tx.qsize()}")
 
         if TimerService.TIMER_KEY_ADD_TX not in self.__timer_service.timer_list:
+            logging.warning(f"send_tx_in_timer : duration = {conf.SEND_TX_LIST_DURATION}")
             self.__timer_service.add_timer(
                 TimerService.TIMER_KEY_ADD_TX,
                 Timer(
                     target=TimerService.TIMER_KEY_ADD_TX,
-                    duration=duration,
+                    duration=conf.SEND_TX_LIST_DURATION,
                     callback=self.__send_tx_by_timer,
                     callback_kwargs={}
                 )
@@ -424,6 +429,7 @@ class _BroadcastThread(CommonThread):
 
         while self.is_run():
             priority, command, params, future = self.broadcast_queue.get()
+            logging.warning(f"command = {command}") #, params = {params}")
             if command is None:
                 break
 
@@ -464,6 +470,7 @@ class _BroadcastSchedulerThread(BroadcastScheduler):
 class _BroadcastSchedulerMp(BroadcastScheduler):
     def __init__(self, channel: str, self_target: str=None):
         super().__init__()
+        print(f"BroadcastSchedulerMp __init__ : {channel}")
 
         self.__channel = channel
         self.__self_target = self_target
@@ -475,10 +482,15 @@ class _BroadcastSchedulerMp(BroadcastScheduler):
 
     @staticmethod
     def _main(broadcast_queue: mp.Queue, channel: str, self_target: str, properties: ModuleProcessProperties=None):
+        print(f"BroadcastScheduler main()")
+        import setproctitle
+        setproctitle.setproctitle(f"python _BroadcastSchedulerMp._main")
+
         if properties is not None:
             ModuleProcess.load_properties(properties, f"{channel}_broadcast")
 
         logging.info(f"BroadcastScheduler process({channel}) start")
+        print(f"BroadcastScheduler process({channel}) start")
 
         broadcast_queue.cancel_join_thread()
 
@@ -499,7 +511,9 @@ class _BroadcastSchedulerMp(BroadcastScheduler):
         signal.signal(signal.SIGINT, _signal_handler)
 
         while True:
+            logging.warning(f"broadcastSchedulerMp:: main")
             command, params = broadcast_queue.get()
+            logging.warning(f"broadcastSchedulerMp : command = {command}")
             if not broadcaster.is_running or command is None:
                 break
             broadcaster.handle_command(command, params)
@@ -510,6 +524,8 @@ class _BroadcastSchedulerMp(BroadcastScheduler):
         logging.info(f"BroadcastScheduler process({channel}) end")
 
     def start(self):
+        logging.warning(f"_BroadcastSchedulerMp :: start()")
+
         def crash_callback_in_join_thread(process: ModuleProcess):
             os.kill(os.getpid(), signal.SIGTERM)
 
@@ -517,6 +533,7 @@ class _BroadcastSchedulerMp(BroadcastScheduler):
         self.__process.start(target=_BroadcastSchedulerMp._main,
                              args=args,
                              crash_callback_in_join_thread=crash_callback_in_join_thread)
+        logging.warning(f"_BroadcastSchedulerMp :: started")
 
     def stop(self):
         logging.info(f"Terminate BroadcastScheduler process({self})")
@@ -526,6 +543,7 @@ class _BroadcastSchedulerMp(BroadcastScheduler):
         self.__process.join()
 
     def _put_command(self, command, params, block=False, block_timeout=None):
+        logging.warning(f"put_command : {command}")
         self.__broadcast_queue.put((command, params))
 
 
