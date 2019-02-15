@@ -16,6 +16,7 @@ import json
 import leveldb
 import pickle
 import threading
+import traceback
 from enum import Enum
 
 import loopchain.utils as util
@@ -251,6 +252,7 @@ class BlockChain:
                 self.__update_batch(new_batch)
             except Exception:
                 logging.warning(f"blockchain:add_block FAIL blockchain.__write_block")
+                traceback.print_exc()
                 raise
             finally:
                 self.__invoke_results.pop(block.header.hash, None)
@@ -259,6 +261,7 @@ class BlockChain:
                 ObjectManager().channel_service.score_write_precommit_state(block)
             except Exception:
                 logging.warning(f"blockchain:add_block FAIL channel_service.score_write_precommit_state")
+                traceback.print_exc()
 
                 self.__revert_batch(new_batch, old_batch)
                 raise
@@ -335,8 +338,7 @@ class BlockChain:
         old_total_tx_bytes = util.int_to_bytes(self.__total_tx)
         new_total_tx_bytes = util.int_to_bytes(new_total_tx)
 
-        block_version = self.__block_versioner.get_version(block.header.height)
-        block_serializer = BlockSerializer.new(block_version, self.tx_versioner)
+        block_serializer = BlockSerializer.new(block.header.version, self.tx_versioner)
         block_serialized = json.dumps(block_serializer.serialize(block))
         new_block_hash_encoded = block.header.hash.hex().encode()
         old_block_hash_encoded = self.__last_block and self.__last_block.header.hash.hex().encode('UTF-8')

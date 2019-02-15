@@ -785,7 +785,6 @@ class ChannelService:
         response_to_json_query(response)
 
         block_builder = BlockBuilder.from_new(block, self.block_manager.get_blockchain().tx_versioner)
-        block_builder.reset_cache()
         block_builder.commit_state = {
             ChannelProperty().name: response['stateRootHash']
         }
