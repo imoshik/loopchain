@@ -13,15 +13,11 @@
 # limitations under the License.
 """ A module for utility"""
 
-import copy
 import datetime
-import hashlib
 import importlib.machinery
 import json
-import leveldb
 import logging
 import os
-import os.path as osp
 import pickle
 import re
 import signal
@@ -36,14 +32,14 @@ from binascii import unhexlify
 from contextlib import closing
 from decimal import Decimal
 from fluent import event
-from jsonrpcclient import HTTPClient
-from jsonrpcclient.exceptions import ReceivedErrorResponse
 from pathlib import Path
 from subprocess import PIPE, Popen, TimeoutExpired
 
 from loopchain import configure as conf
 from loopchain.protos import loopchain_pb2, message_code
 from loopchain.tools.grpc_helper import GRPCHelper
+from loopchain.store.key_value_store import KeyValueStoreError, KeyValueStore
+from loopchain.store.key_value_store_factory import KeyValueStoreType, KeyValueStoreFactory
 
 apm_event = None
 block_dumps = None
@@ -457,35 +453,34 @@ def parse_target_list(targets: str) -> list:
     return target_list
 
 
-def init_level_db(level_db_identity, allow_rename_path=True):
-    """init Level Db
+def init_default_key_value_store(store_identity) -> KeyValueStore:
+    """init default key value store
 
-    :param level_db_identity: identity for leveldb
-    :return: level_db, level_db_path
+    :param store_identity: identity for store
+    :return: KeyValueStore, store_path
     """
-    level_db = None
-
     if not os.path.exists(conf.DEFAULT_STORAGE_PATH):
         os.makedirs(conf.DEFAULT_STORAGE_PATH)
 
-    db_default_path = osp.join(conf.DEFAULT_STORAGE_PATH, 'db_' + level_db_identity)
-    db_path = db_default_path
-    logger.spam(f"utils:init_level_db ({level_db_identity})")
+    store_default_path = os.path.join(conf.DEFAULT_STORAGE_PATH, 'db_' + store_identity)
+    store_path = store_default_path
+    logger.spam(f"utils:init_default_key_value_store ({store_identity})")
 
     retry_count = 0
-    while level_db is None and retry_count < conf.MAX_RETRY_CREATE_DB:
+    plyvel_store = None
+    while plyvel_store is None and retry_count < conf.MAX_RETRY_CREATE_DB:
         try:
-            level_db = leveldb.LevelDB(db_path, create_if_missing=True)
-        except leveldb.LevelDBError:
-            if allow_rename_path:
-                db_path = db_default_path + str(retry_count)
+            uri = f"file://{store_path}"
+            plyvel_store = KeyValueStoreFactory.new(KeyValueStoreType.PLYVEL, uri, create_if_missing=True)
+        except KeyValueStoreError:
+            traceback.print_exc()
         retry_count += 1
 
-    if level_db is None:
-        logging.error("Fail! Create LevelDB")
-        raise leveldb.LevelDBError("Fail To Create Level DB(path): " + db_path)
+    if plyvel_store is None:
+        logging.error("Fail! Create plyvel store")
+        raise KeyValueStoreError(f"Fail to create plyvel store. path={store_path}")
 
-    return level_db, db_path
+    return plyvel_store, store_path
 
 
 def no_send_apm_event(peer_id, event_param):

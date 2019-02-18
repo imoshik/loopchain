@@ -19,47 +19,42 @@ from loopchain.blockchain import *
 class AdminManager:
     """Radiostation 내에서 Channel 정보와 Peer 정보를 관리한다."""
 
-    def __init__(self, level_db_identity):
-        self.__level_db = None
-        self.__level_db_path = ""
-        self.__level_db, self.__level_db_path = util.init_level_db(
-            level_db_identity=f"{level_db_identity}_admin",
-            allow_rename_path=False
-        )
+    def __init__(self, store_identity):
+
+        key_value_store, key_value_store_path = util.init_default_key_value_store(f"{store_identity}_admin")
+        self.__key_value_store = key_value_store
+        self.__key_value_store_path = key_value_store_path
 
         self.__json_data = None
         self.load_json_data(conf.CHANNEL_MANAGE_DATA_PATH)
 
     def save_peer_manager(self, channel, peer_manager: PeerManager):
-        """peer_list 를 leveldb 에 저장한다.
+        """peer_list 를 key value store 에 저장한다.
 
         :param channel:
         :param peer_manager:
         """
         # util.logger.spam(f"rs_admin_manager:save_peer_manager")
 
-        level_db_key_name = str.encode(
-            conf.LEVEL_DB_KEY_FOR_PEER_LIST + f"_{channel}")
+        store_key = str.encode(conf.LEVEL_DB_KEY_FOR_PEER_LIST + f"_{channel}")
 
         try:
             dump = peer_manager.dump()
-            level_db = self.__level_db
-            level_db.Put(level_db_key_name, dump)
+            self.__key_value_store.put(store_key, dump)
         except AttributeError as e:
             logging.warning("Fail Save Peer_list: " + str(e))
 
     def load_peer_manager(self, channel):
-        """leveldb 로 부터 peer_manager 를 가져온다.
+        """key value store 로 부터 peer_manager 를 가져온다.
 
         :return: peer_manager
         """
-        level_db_key_name = str.encode(
-            conf.LEVEL_DB_KEY_FOR_PEER_LIST + f"_{channel}")
+        store_key = str.encode(conf.LEVEL_DB_KEY_FOR_PEER_LIST + f"_{channel}")
 
         peer_manager = PeerManager(channel)
 
         try:
-            peer_list_data = pickle.loads(self.__level_db.Get(level_db_key_name))
+            peer_list_data = pickle.loads(self.__key_value_store.get(store_key))
             peer_manager.load(peer_list_data)
             logging.debug("load peer_list_data from db: " + peer_manager.get_peers_for_debug()[0])
         except KeyError:

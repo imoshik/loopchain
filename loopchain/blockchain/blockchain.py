@@ -13,7 +13,6 @@
 # limitations under the License.
 """Block chain class with authorized blocks only"""
 import json
-import leveldb
 import pickle
 import threading
 from enum import Enum
@@ -28,6 +27,8 @@ from loopchain.blockchain.exception import *
 from loopchain.blockchain.score_base import *
 from loopchain.channel.channel_property import ChannelProperty
 from loopchain.utils.message_queue import StubCollection
+from loopchain.store.key_value_store import KeyValueStoreError, KeyValueStore
+from loopchain.store.key_value_store_factory import KeyValueStoreType, KeyValueStoreFactory
 
 
 class NID(Enum):
@@ -49,7 +50,7 @@ class BlockChain:
     BLOCK_INFO_KEY = b'block_info_key'
     INVOKE_RESULT_BLOCK_HEIGHT_KEY = b'invoke_result_block_height_key'
 
-    def __init__(self, blockchain_db=None, channel_name=None):
+    def __init__(self, blockchain_store: KeyValueStore=None, channel_name=None):
         if channel_name is None:
             channel_name = conf.LOOPCHAIN_DEFAULT_CHANNEL
 
@@ -62,14 +63,17 @@ class BlockChain:
         self.__peer_id = ChannelProperty().peer_id
 
         # block db has [ block_hash - block | block_height - block_hash | BlockChain.LAST_BLOCK_KEY - block_hash ]
-        self.__confirmed_block_db = blockchain_db
-        # logging.debug(f"BlockChain::init confirmed_block_db({self.__confirmed_block_db})")
+        self.__confirmed_block_store = blockchain_store
+        self.__confirmed_block_store_allocated = False
+        # logging.debug(f"BlockChain::init confirmed_block_store({self.__confirmed_block_store})")
 
-        if self.__confirmed_block_db is None:
+        if self.__confirmed_block_store is None:
             try:
-                self.__confirmed_block_db = leveldb.LevelDB(conf.DEFAULT_LEVEL_DB_PATH)
-            except leveldb.LevelDBError:
-                raise leveldb.LevelDBError("Fail To Create Level DB(path): " + conf.DEFAULT_LEVEL_DB_PATH)
+                uri = f"file://{conf.DEFAULT_LEVEL_DB_PATH}"
+                self.__confirmed_block_store = KeyValueStoreFactory.new(KeyValueStoreType.PLYVEL, uri)
+                self.__confirmed_block_store_allocated = True
+            except KeyValueStoreError:
+                raise KeyValueStoreError(f"Fail to create plyvel store. path={conf.DEFAULT_LEVEL_DB_PATH}")
 
         # made block count as a leader
         self.__invoke_results = {}
@@ -89,9 +93,10 @@ class BlockChain:
         for tx_version, tx_hash_version in channel_option.get("hash_versions", {}).items():
             self.__tx_versioner.hash_generator_versions[tx_version] = tx_hash_version
 
-    def close_blockchain_db(self):
-        del self.__confirmed_block_db
-        self.__confirmed_block_db = None
+    def close_blockchain_store(self):
+        if self.__confirmed_block_store_allocated:
+            self.__confirmed_block_store.close()
+        self.__confirmed_block_store: KeyValueStore = None
 
     @property
     def block_height(self):
@@ -144,7 +149,7 @@ class BlockChain:
         block_height = self.__last_block.header.height
 
         while block_hash != "":
-            block_dump = self.__confirmed_block_db.Get(block_hash.encode(encoding='UTF-8'))
+            block_dump = self.__confirmed_block_store.get(block_hash.encode(encoding='UTF-8'))
             block_version = self.__block_versioner.get_version(block_height)
             block_serializer = BlockSerializer.new(block_version, self.tx_versioner)
             block = block_serializer.deserialize(json.loads(block_dump))
@@ -159,12 +164,12 @@ class BlockChain:
         return total_tx
 
     def _rebuild_transaction_count_from_cached(self):
-        tx_count_bytes = self.__confirmed_block_db.Get(BlockChain.TRANSACTION_COUNT_KEY)
+        tx_count_bytes = self.__confirmed_block_store.get(BlockChain.TRANSACTION_COUNT_KEY)
         return int.from_bytes(tx_count_bytes, byteorder='big')
 
     def __find_block_by_key(self, key):
         try:
-            block_bytes = self.__confirmed_block_db.Get(key)
+            block_bytes = self.__confirmed_block_store.get(key)
             block_dumped = json.loads(block_bytes)
             block_height = self.__block_versioner.get_height(block_dumped)
             block_version = self.__block_versioner.get_version(block_height)
@@ -194,8 +199,8 @@ class BlockChain:
             return self.__last_block
 
         try:
-            key = self.__confirmed_block_db.Get(BlockChain.BLOCK_HEIGHT_KEY +
-                                                block_height.to_bytes(conf.BLOCK_HEIGHT_BYTES_LEN, byteorder='big'))
+            key = self.__confirmed_block_store.get(BlockChain.BLOCK_HEIGHT_KEY +
+                                                   block_height.to_bytes(conf.BLOCK_HEIGHT_BYTES_LEN, byteorder='big'))
         except KeyError:
             if self.last_unconfirmed_block:
                 if self.last_unconfirmed_block.header.height == block_height:
@@ -208,7 +213,7 @@ class BlockChain:
         block_hash_encoded = block_hash.hex().encode(encoding='UTF-8')
 
         try:
-            return self.__confirmed_block_db.Get(BlockChain.BLOCK_INFO_KEY + block_hash_encoded)
+            return self.__confirmed_block_store.get(BlockChain.BLOCK_INFO_KEY + block_hash_encoded)
         except KeyError:
             return None
 
@@ -299,22 +304,22 @@ class BlockChain:
         block_serialized = json.dumps(block_serializer.serialize(block))
         block_hash_encoded = block.header.hash.hex().encode(encoding='UTF-8')
 
-        batch = leveldb.WriteBatch()
-        batch.Put(block_hash_encoded, block_serialized.encode("utf-8"))
-        batch.Put(BlockChain.LAST_BLOCK_KEY, block_hash_encoded)
-        batch.Put(BlockChain.TRANSACTION_COUNT_KEY, next_total_tx_bytes)
-        batch.Put(
+        batch = self.__confirmed_block_store.WriteBatch()
+        batch.put(block_hash_encoded, block_serialized.encode("utf-8"))
+        batch.put(BlockChain.LAST_BLOCK_KEY, block_hash_encoded)
+        batch.put(BlockChain.TRANSACTION_COUNT_KEY, next_total_tx_bytes)
+        batch.put(
             BlockChain.BLOCK_HEIGHT_KEY +
             block.header.height.to_bytes(conf.BLOCK_HEIGHT_BYTES_LEN, byteorder='big'),
             block_hash_encoded)
 
         if block_info:
-            batch.Put(
+            batch.put(
                 BlockChain.BLOCK_INFO_KEY + block_hash_encoded,
                 b'0x1'
             )
 
-        self.__confirmed_block_db.Write(batch)
+        batch.write()
 
         return next_total_tx
 
@@ -357,7 +362,7 @@ class BlockChain:
         if score_last_block_height == next_height + 1:
             try:
                 invoke_result_block_height_bytes = \
-                    self.__confirmed_block_db.Get(BlockChain.INVOKE_RESULT_BLOCK_HEIGHT_KEY)
+                    self.__confirmed_block_store.get(BlockChain.INVOKE_RESULT_BLOCK_HEIGHT_KEY)
                 invoke_result_block_height = int.from_bytes(invoke_result_block_height_bytes, byteorder='big')
 
                 if invoke_result_block_height == next_height:
@@ -397,7 +402,7 @@ class BlockChain:
                 'result': invoke_result
             }
 
-            self.__confirmed_block_db.Put(
+            self.__confirmed_block_store.put(
                 tx_hash.encode(encoding=conf.HASH_KEY_ENCODING),
                 json.dumps(tx_info).encode(encoding=conf.PEER_DATA_ENCODING))
 
@@ -419,7 +424,7 @@ class BlockChain:
         bit_length = height.bit_length()
         byte_length = (bit_length + 7) // 8
         block_height_bytes = height.to_bytes(byte_length, byteorder='big')
-        self.__confirmed_block_db.Put(
+        self.__confirmed_block_store.put(
             BlockChain.INVOKE_RESULT_BLOCK_HEIGHT_KEY,
             block_height_bytes
         )
@@ -455,7 +460,7 @@ class BlockChain:
         list_key = self.__get_tx_list_key(address, index)
 
         try:
-            tx_list = pickle.loads(self.__confirmed_block_db.Get(list_key))
+            tx_list = pickle.loads(self.__confirmed_block_store.get(list_key))
             next_index = tx_list[-1]
         except KeyError:
             tx_list = [0]  # 0 means there is no more list after this.
@@ -468,7 +473,7 @@ class BlockChain:
 
     def find_nid(self):
         try:
-            nid = self.__confirmed_block_db.Get(BlockChain.NID_KEY)
+            nid = self.__confirmed_block_store.get(BlockChain.NID_KEY)
             return nid.decode(conf.HASH_KEY_ENCODING)
         except KeyError as e:
             logging.debug(f"blockchain:get_nid::There is no NID.")
@@ -480,12 +485,12 @@ class BlockChain:
         if len(current_list) > conf.MAX_TX_LIST_SIZE_BY_ADDRESS:
             new_index = current_index + 1
             new_list_key = self.__get_tx_list_key(address, new_index)
-            self.__confirmed_block_db.Put(new_list_key, pickle.dumps(current_list))
+            self.__confirmed_block_store.put(new_list_key, pickle.dumps(current_list))
             current_list = [new_index]
 
         current_list.insert(0, tx_hash)
         list_key = self.__get_tx_list_key(address, 0)
-        self.__confirmed_block_db.Put(list_key, pickle.dumps(current_list))
+        self.__confirmed_block_store.put(list_key, pickle.dumps(current_list))
 
         return True
 
@@ -538,7 +543,7 @@ class BlockChain:
             tx_hash_key = tx_hash_key.hex()
 
         try:
-            tx_info = self.__confirmed_block_db.Get(
+            tx_info = self.__confirmed_block_store.get(
                 tx_hash_key.encode(encoding=conf.HASH_KEY_ENCODING))
             tx_info_json = json.loads(tx_info, encoding=conf.PEER_DATA_ENCODING)
 
@@ -592,7 +597,7 @@ class BlockChain:
             block_serialized = block_serializer.serialize(precommit_block)
             block_serialized = json.dumps(block_serialized)
             block_serialized = block_serialized.encode('utf-8')
-            results = self.__confirmed_block_db.Put(BlockChain.PRECOMMIT_BLOCK_KEY, block_serialized)
+            results = self.__confirmed_block_store.put(BlockChain.PRECOMMIT_BLOCK_KEY, block_serialized)
 
             util.logger.spam(f"result of to write to db ({results})")
             logging.info(f"ADD BLOCK PRECOMMIT HEIGHT : {precommit_block.header.height} , "
@@ -616,7 +621,7 @@ class BlockChain:
         if nid is None:
             return
 
-        results = self.__confirmed_block_db.Put(BlockChain.NID_KEY, nid.encode(encoding=conf.HASH_KEY_ENCODING))
+        results = self.__confirmed_block_store.put(BlockChain.NID_KEY, nid.encode(encoding=conf.HASH_KEY_ENCODING))
         util.logger.spam(f"result of to write to db ({results})")
 
         return results
@@ -671,15 +676,15 @@ class BlockChain:
             return unconfirmed_block
 
     def init_blockchain(self, is_leader=False):
-        # level DB에서 블럭을 읽어 들이며, 만약 levelDB에 블럭이 없을 경우 제네시스 블럭을 만든다
+        # key value store 에서 블럭을 읽어 들이며, 만약 key value store 에 블럭이 없을 경우 제네시스 블럭을 만든다
         try:
-            last_block_key = self.__confirmed_block_db.Get(BlockChain.LAST_BLOCK_KEY, True)
+            last_block_key = self.__confirmed_block_store.get(BlockChain.LAST_BLOCK_KEY, True)
         except KeyError:
             last_block_key = None
         logging.debug("LAST BLOCK KEY : %s", last_block_key)
 
         if last_block_key:
-            block_dump = self.__confirmed_block_db.Get(last_block_key)
+            block_dump = self.__confirmed_block_store.get(last_block_key)
             block_dump = json.loads(block_dump)
             block_height = self.__block_versioner.get_height(block_dump)
             block_version = self.__block_versioner.get_version(block_height)
