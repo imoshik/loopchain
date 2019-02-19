@@ -48,3 +48,4 @@ class BlockProverType(Enum):
     Block = auto()
     Transaction = auto()
     Receipt = auto()
+    Rep = auto()

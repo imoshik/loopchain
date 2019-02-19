@@ -18,7 +18,7 @@ import pickle
 import threading
 import traceback
 from enum import Enum
-from typing import Union
+from typing import Union, List
 
 import loopchain.utils as util
 from loopchain import configure as conf
@@ -550,7 +550,7 @@ class BlockChain:
 
         return tx_info_json
 
-    def __add_genesis_block(self, tx_info: dict=None):
+    def __add_genesis_block(self, tx_info: dict, reps: List[ExternalAddress]):
         """
         :param tx_info: Transaction data for making genesis block from an initial file
         :return:
@@ -573,6 +573,7 @@ class BlockChain:
         block_builder.prev_hash = None
         block_builder.next_leader = ExternalAddress.fromhex(self.__peer_id)
         block_builder.transactions[tx.hash] = tx
+        block_builder.reps = reps
         block = block_builder.build()  # It does not have commit state. It will be rebuilt.
 
         block, invoke_results = ObjectManager().channel_service.genesis_invoke(block)
@@ -694,7 +695,7 @@ class BlockChain:
             self.__block_height = self.__last_block.header.height
         logging.debug(f"ENGINE-303 init_blockchain: {self.__block_height}")
 
-    def generate_genesis_block(self):
+    def generate_genesis_block(self, reps: List[ExternalAddress]):
         tx_info = None
         nid = NID.unknown.value
         if "genesis_data_path" in conf.CHANNEL_OPTION[self.__channel_name]:
@@ -711,7 +712,7 @@ class BlockChain:
             except KeyError as e:
                 exit(f"cannot find key name of {e} in genesis data file.")
 
-        self.__add_genesis_block(tx_info)
+        self.__add_genesis_block(tx_info, reps)
         self.put_nid(nid)
         ChannelProperty().nid = nid
 

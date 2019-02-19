@@ -31,7 +31,7 @@ from loopchain.baseservice import TimerService, BlockGenerationScheduler, Object
 from loopchain.baseservice.aging_cache import AgingCache
 from loopchain.blockchain import TransactionStatusInQueue, BlockChain, CandidateBlocks, Block, Epoch, Transaction, \
     TransactionInvalidDuplicatedHash, TransactionInvalidOutOfTimeBound, BlockchainError, Vote, NID, BlockSerializer, \
-    exception, BlockVerifier
+    exception, BlockVerifier, ExternalAddress
 from loopchain.channel.channel_property import ChannelProperty
 from loopchain.peer import status_code
 from loopchain.peer.consensus_siever import ConsensusSiever
@@ -441,9 +441,13 @@ class BlockManager:
             block_verifier.invoke_func = self.__channel_service.genesis_invoke
         else:
             block_verifier.invoke_func = self.__channel_service.score_invoke
+
+        reps = [ExternalAddress.fromhex_address(peer['id'])
+                for peer in self.__channel_service.get_channel_infos()['peers']]
         invoke_results = block_verifier.verify_loosely(block_,
                                                        self.__blockchain.last_block,
-                                                       self.__blockchain)
+                                                       self.__blockchain,
+                                                       reps=reps)
         self.__blockchain.set_invoke_results(block_.header.hash.hex(), invoke_results)
         return self.__blockchain.add_block(block_)
 
@@ -451,9 +455,7 @@ class BlockManager:
         prev_block = self.__blockchain.last_unconfirmed_block
         block_info = block_.body.confirm_prev_block
 
-        commit_state = prev_block.header.commit_state
-        logging.debug(f"block_manager.py >> block_height_sync :: "
-                      f"height({prev_block.header.height}) commit_state({commit_state})")
+        logging.debug(f"block_manager.py >> block_height_sync :: height({prev_block.header.height})")
 
         block_version = self.get_blockchain().block_versioner.get_version(prev_block.header.height)
         block_verifier = BlockVerifier.new(block_version, self.get_blockchain().tx_versioner)
@@ -461,9 +463,14 @@ class BlockManager:
             block_verifier.invoke_func = self.__channel_service.genesis_invoke
         else:
             block_verifier.invoke_func = self.__channel_service.score_invoke
+
+        reps = [ExternalAddress.fromhex_address(peer['id'])
+                for peer in self.__channel_service.get_channel_infos()['peers']]
+        logging.debug(f"Reps : {reps}")
         invoke_results = block_verifier.verify_loosely(prev_block,
                                                        self.__blockchain.last_block,
-                                                       self.__blockchain)
+                                                       self.__blockchain,
+                                                       reps=reps)
         self.__blockchain.set_invoke_results(prev_block.header.hash.hex(), invoke_results)
         return self.__blockchain.add_block(prev_block, block_info)
 
@@ -758,12 +765,16 @@ class BlockManager:
         block_verifier = BlockVerifier.new(block_version, self.__blockchain.tx_versioner)
         block_verifier.invoke_func = self.__channel_service.score_invoke
 
+        reps = [ExternalAddress.fromhex_address(peer['id'])
+                for peer in self.__channel_service.get_channel_infos()['peers']]
+
         exception = None
         try:
             invoke_results = block_verifier.verify(unconfirmed_block,
                                                    self.__blockchain.last_block,
                                                    self.__blockchain,
-                                                   self.__blockchain.last_block.header.next_leader)
+                                                   self.__blockchain.last_block.header.next_leader,
+                                                   reps=reps)
         except Exception as e:
             exception = e
             logging.error(e)

@@ -688,7 +688,7 @@ class ChannelInnerTask:
 
             return response_message, -1, blockchain.block_height, None
 
-        logging.info(f"block header : {block.header}")
+        logging.debug(f"block header : {block.header}")
 
         block_dumped = util.block_dumps(block)
         return message_code.Response.success, block.header.height, blockchain.block_height, block_dumped
