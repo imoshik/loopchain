@@ -801,7 +801,7 @@ class ChannelService:
         block_builder.commit_state = {
             ChannelProperty().name: response['stateRootHash']
         }
-        block_builder.state_root_hash = Hash32(bytes.fromhex(response['stateRootHash']))
+        block_builder.state_hash = Hash32(bytes.fromhex(response['stateRootHash']))
         block_builder.receipts = tx_receipts
         block_builder.reps = [ExternalAddress.fromhex_address(peer['id']) for peer in self.get_channel_infos()['peers']]
         new_block = block_builder.build()
@@ -842,7 +842,7 @@ class ChannelService:
         block_builder.commit_state = {
             ChannelProperty().name: response['stateRootHash']
         }
-        block_builder.state_root_hash = Hash32(bytes.fromhex(response['stateRootHash']))
+        block_builder.state_hash = Hash32(bytes.fromhex(response['stateRootHash']))
         block_builder.receipts = tx_receipts
         block_builder.reps = [ExternalAddress.fromhex_address(peer['id']) for peer in self.get_channel_infos()['peers']]
         new_block = block_builder.build()
