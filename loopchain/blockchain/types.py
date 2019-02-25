@@ -119,6 +119,9 @@ class BloomFilter(Bytes):
         result = int.from_bytes(self, 'big') | int.from_bytes(other, 'big')
         return self.__class__(result.to_bytes(self.size, 'big'))
 
+    def hex_0x(self):
+        return self.prefix + self.hex()
+
 
 class Signature(Bytes):
     size = 65
