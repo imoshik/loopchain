@@ -247,28 +247,39 @@ class BlockManager:
 
     def confirm_prev_block(self, current_block: Block):
         try:
-            self.__blockchain.confirm_prev_block(current_block)
+            if current_block.body.confirm_prev_block:
+                self.__blockchain.confirm_prev_block(current_block)
+                # stop leader complain timer
+                self.__channel_service.stop_leader_complain_timer()
 
-            # stop leader complain timer
-            self.__channel_service.stop_leader_complain_timer()
+                # start new epoch
+                self.epoch = Epoch.new_epoch()
+            elif self.__blockchain.last_unconfirmed_block is None:
+                if self.__blockchain.last_block.header.hash == current_block.header.prev_hash:
+                    self.__blockchain.last_unconfirmed_block = current_block
+                else:
+                    raise BlockchainError(f"last block is not previous block. block={current_block}")
 
-            # start new epoch
-            self.epoch = Epoch.new_epoch()
+            return True
         except BlockchainError as e:
             logging.warning(f"BlockchainError while confirm_block({e}), retry block_height_sync")
-            self.block_height_sync()
+            self.__channel_service.state_machine.block_sync()
+            return False
 
     def add_unconfirmed_block(self, unconfirmed_block):
         logging.info(f"unconfirmed_block {unconfirmed_block.header.height}, {unconfirmed_block.body.confirm_prev_block}")
         # util.logger.debug(f"-------------------add_unconfirmed_block---before confirm_prev_block, "
         #                    f"tx count({len(unconfirmed_block.body.transactions)}), "
         #                    f"height({unconfirmed_block.header.height})")
-        if unconfirmed_block.body.confirm_prev_block:
-            self.confirm_prev_block(unconfirmed_block)
+        result = self.confirm_prev_block(unconfirmed_block)
+        if not result:
+            return False
 
         self.epoch.set_epoch_leader(unconfirmed_block.header.next_leader.hex_hx())
 
         self.__unconfirmedBlockQueue.put(unconfirmed_block)
+
+        return True
 
     def add_confirmed_block(self, confirmed_block: Block):
         result = self.__blockchain.add_block(confirmed_block)
@@ -471,15 +482,18 @@ class BlockManager:
 
         # Make Peer Stub List [peer_stub, ...] and get max_height of network
         max_height, unconfirmed_block_height, peer_stubs = self.__get_peer_stub_list()
-
-        self.__blockchain.last_unconfirmed_block = None
-        my_height = self.__current_block_height()
-        retry_number = 0
-        util.logger.spam(f"block_manager:block_height_sync my_height({my_height})")
-
         if len(peer_stubs) == 0:
             util.logger.warning("peer_service:block_height_sync there is no other peer to height sync!")
             return False
+
+        if self.__blockchain.last_unconfirmed_block is not None:
+            self.candidate_blocks.remove_block(self.__blockchain.last_unconfirmed_block.header.hash)
+        self.__blockchain.last_unconfirmed_block = None
+        self.__unconfirmedBlockQueue = queue.Queue()
+
+        my_height = self.__current_block_height()
+        retry_number = 0
+        util.logger.spam(f"block_manager:block_height_sync my_height({my_height})")
 
         logging.info(f"In block height sync max: {max_height} yours: {my_height}")
 
@@ -560,7 +574,6 @@ class BlockManager:
 
         if my_height >= max_height:
             util.logger.debug(f"block_manager:block_height_sync is complete.")
-            self.__unconfirmedBlockQueue = queue.Queue()
             next_leader = self.__current_last_block().header.next_leader
             leader_peer = self.__channel_service.peer_manager.get_peer(next_leader.hex_hx()) if next_leader else None
             if leader_peer:
